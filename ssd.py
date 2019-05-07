@@ -94,10 +94,11 @@ class BCE_Loss(nn.Module):
         return None
 
 class FocalLoss(BCE_Loss):
-    """Focal loss modifies BCE_Loss by adding weighting, details to come.
+    """Focal loss modifies BCE_Loss by de-emphasizing well classified categories
+       and emphasizing poorly classified categories. Setting gamma to 0 is equivalent
+       to the standard BCE_Loss
     """
-    def get_weight(self, x: torch.Tensor, t: torch.Tensor):
-        alpha,gamma = 0.25, 1
+    def get_weight(self, x: torch.Tensor, t: torch.Tensor, alpha: float=.5, gamma: float=2.):
         p = x.sigmoid()
         pt = p*t + (1-p)*(1-t)
         w = alpha*t + (1-alpha)*(1-t)

@@ -18,7 +18,7 @@ from typing import List, Union, Tuple, Callable, Optional
 
 
 class StdConv(nn.Module):
-    def __init__(self, nin: int, nout: int, stride: int=2, dropout: float=0.1):
+    def __init__(self, nin: int, nout: int, stride: int=2, dropout: float=0.4):
         super().__init__()
         self.conv = nn.Conv2d(nin, nout, 3, stride, padding=1)
         self.bn = nn.BatchNorm2d(nout)
@@ -85,10 +85,10 @@ class BCE_Loss(nn.Module):
         
     def forward(self, pred: torch.Tensor, targ: torch.Tensor):
         t = one_hot_embedding(targ, self.num_classes)
-        t = t[:,:-1].contiguous()
-        x = pred[:, :-1].cpu()
-        w = (self.get_weight(x, t)).detach()
-        return F.binary_cross_entropy_with_logits(x, t, w, size_average=False)/self.num_classes
+        t = t[:,1:].contiguous()
+        x = pred[:, 1:].cpu()
+        w = (self.get_weight(x, t))
+        return F.binary_cross_entropy_with_logits(x, t, w, size_average=False)/(self.num_classes - 1)
     
     def get_weight(self, x: torch.Tensor, t: torch.Tensor):
         return None
@@ -101,7 +101,8 @@ class FocalLoss(BCE_Loss):
         p = x.sigmoid()
         pt = p*t + (1-p)*(1-t)
         w = alpha*t + (1-alpha)*(1-t)
-        return w * (1-pt).pow(gamma) 
+        w = w * (1-pt).pow(gamma)
+        return w.detach()
 
 
 # In[27]:

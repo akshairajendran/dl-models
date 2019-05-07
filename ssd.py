@@ -7,9 +7,7 @@
 from path import Path
 from fastai.vision import *
 import numpy as np
-import pandas as pd
-from PIL import Image
-import json
+import pandas as p
 import matplotlib.cm as cmx
 import matplotlib.colors as mcolors
 from cycler import cycler
@@ -144,6 +142,7 @@ class SingleShotDetector():
         self.loss_func = loss_func(self.num_classes)
         self.head = SSD_MultiHead(self.k, self.num_classes, self.bias, self.dropout)
         self.learn = cnn_learner(self.data, self.base_arch, custom_head=self.head)
+        self.learn.loss_func = self._ssd_loss
         
         ###Init Drawing###
         self.num_color = num_color
@@ -153,7 +152,7 @@ class SingleShotDetector():
         ###Init Misc###
         self.verbose = verbose
     
-    def plot_anchors(self):
+    def show_anchors(self):
         """Plots anchor points on blank plot
         """
         fig2 = plt.figure()
@@ -162,6 +161,23 @@ class SingleShotDetector():
         plt.xlim(0, 1)
         plt.ylim(0, 1)
     
+    def show_results(self, ignore_bg: bool=True):
+        """Shows predictions on a batch of images
+        """
+        self.learn.model.eval()
+        x,y = next(iter(self.data.valid_dl))
+        batch = self.learn.model(x)
+        b_clas,b_bb = batch
+        #let's visualize the the model after some training
+        fig, axes = plt.subplots(3, 4, figsize=(16, 12))
+        for i, ax in enumerate(axes.flat):
+            ima = to_np(self.data.denorm(x)[i].permute(1,2,0)) #denormalize x at idx and assign to ima var
+            bbox,clas = self._get_y(y[0][i], y[1][i]) #get ground truth bbox and class
+            a_ic = self._actn_to_bb(b_bb[i], self.anchors) #convert bounding box predictions into plottable format
+            self._torch_gt(ax, ima, a_ic, b_clas[i].max(1)[1], b_clas[i].max(1)[0].sigmoid(), thresh=self.thresh, ignore_bg=ignore_bg)
+
+        plt.subplots_adjust(wspace=0.15, hspace=0.15)
+        
     def _ssd_1_loss(self, b_c: torch.Tensor, b_bb: torch.Tensor, bbox: torch.Tensor, clas: torch.Tensor, 
                     thresh: Optional[float]=None, verbose: Optional[bool]=None):
         """Computes loss for one image and set of bbox predictions
@@ -173,7 +189,7 @@ class SingleShotDetector():
         bbox, clas = self._get_y(bbox, clas) #reformat gt bbox and gt clas
         if len(bbox) == 0: return 0, 0 #if there's no bbox, we can't use this in our loss
         a_ic = self._actn_to_bb(b_bb, self.anchors) #map activation b_bb to anchor points (defined above)
-        overlaps = self._jaccard(bbox.data, anchor_cnr.data.cuda().float()) #get overlaps between gt bbox and anchor boxes
+        overlaps = self._jaccard(bbox.data, self.anchor_cnr.data.cuda().float()) #get overlaps between gt bbox and anchor boxes
         gt_overlap, gt_idx = self._map_to_ground_truth(overlaps, verbose)
         gt_clas = clas[gt_idx]
         pos = gt_overlap > thresh
@@ -204,28 +220,26 @@ class SingleShotDetector():
         return lls.cpu() + lcs.cpu() #need to revisit why cpu is necessary
     
     def _show_ground_truth(self, ax, im, bbox: torch.Tensor, clas: Optional[torch.Tensor]=None, 
-                                 prs: Optional[torch.Tensor]=None, thresh: Optional[float]=None):
-        """Displays anchor box, predicted activation and recentered activation
+                                 prs: Optional[torch.Tensor]=None, thresh: Optional[float]=None, ignore_bg: bool=False):
+        """Given ax, image, list of bboxes, list of classes, list of probabilities and threshold
+           Displays image with ground truth broxes
         """
         thresh = self.thresh if not thresh else thresh
-        bb = [bb_hw(o) for o in bbox.reshape(-1,4)]
+        bb = [self._bb_hw(o) for o in bbox.reshape(-1,4)]
         if prs is None:  prs  = [None]*len(bb)
         if clas is None: clas = [None]*len(bb)
         ax = self._show_img(im, ax=ax)
-        k=0
         for i,(b,c,pr) in enumerate(zip(bb, clas, prs)):
+            if c == 0 and ignore_bg:
+                continue
             if((b[2]>0) and (pr is None or pr > thresh)):
-                k+=1
                 self._draw_rect(ax, b, color=self.color_list[i%self.num_color])
-                txt = f'{k}: '
-                if isinstance(c, str):
-                    txt += c
-                else:
-                    if c is not None: txt += str(self.data.classes[c])
+                txt = f'{i}: '
+                if c is not None: txt += str(self.data.classes[c])
                 if pr is not None: txt += f' {pr:.2f}'
-                self._draw_text(ax, b[:2] + np.array([0, np.random.randint(0, 40)]), txt, color=self.color_list[i%self.num_color])
+                self._draw_text(ax, b[:2], txt, color=self.color_list[i%self.num_color])
 
-    def _torch_gt(sefl, ax, ima, bbox: torch.Tensor, clas: torch.Tensor, 
+    def _torch_gt(self, ax, ima, bbox: torch.Tensor, clas: torch.Tensor, 
                         prs: Optional[torch.Tensor]=None, thresh: Optional[float]=None, 
                         ignore_bg: bool=False):
         """Show ground truth given image and torch bbox
@@ -234,7 +248,7 @@ class SingleShotDetector():
         return self._show_ground_truth(ax, ima, to_np((bbox*224).long()),
              to_np(clas), to_np(prs) if prs is not None else None, thresh, ignore_bg=ignore_bg)
     
-    def _actn_to_bb(actn: torch.Tensor, anchors: torch.Tensor):
+    def _actn_to_bb(self, actn: torch.Tensor, anchors: torch.Tensor):
         """Mapping activation to anchor boxes
         """
         actn_bbs = torch.tanh(actn) #map activations to [-1,1]
@@ -271,7 +285,7 @@ class SingleShotDetector():
         """Draws bounding rectangle
         """
         patch = ax.add_patch(patches.Rectangle(b[:2], *b[-2:], fill=False, edgecolor=color, lw=2))
-        self._draw_outline(patch, 4)
+        SingleShotDetector._draw_outline(patch, 4)
 
     @staticmethod
     def _draw_text(ax, xy, txt, sz=14, color='white'):
@@ -279,7 +293,7 @@ class SingleShotDetector():
         """
         text = ax.text(*xy, txt,
             verticalalignment='top', color=color, fontsize=sz, weight='bold')
-        self._draw_outline(text, 1)
+        SingleShotDetector._draw_outline(text, 1)
 
     @staticmethod
     def _get_cmap(N):
@@ -325,8 +339,8 @@ class SingleShotDetector():
         """
         box_a = box_a.cuda().float()
         box_b = box_b.cuda().float()
-        inter = intersection(box_a, box_b)
-        union = (box_sz(box_a).unsqueeze(1) + box_sz(box_b).unsqueeze(0) - inter)
+        inter = SingleShotDetector._intersection(box_a, box_b)
+        union = (SingleShotDetector._box_sz(box_a).unsqueeze(1) +                  SingleShotDetector._box_sz(box_b).unsqueeze(0) - inter)
         return inter/union
 
     @staticmethod

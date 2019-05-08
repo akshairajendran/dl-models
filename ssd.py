@@ -163,7 +163,7 @@ class SingleShotDetector():
         plt.xlim(0, 1)
         plt.ylim(0, 1)
     
-    def show_results(self, ignore_bg: bool=True):
+    def show_results(self, prb_thresh: float=.2, nms_thresh: float=.4, ignore_bg: bool=True):
         """Shows predictions on a batch of images
         """
         self.learn.model.eval()
@@ -176,7 +176,8 @@ class SingleShotDetector():
             ima = to_np(self.data.denorm(x)[i].permute(1,2,0)) #denormalize x at idx and assign to ima var
             bbox,clas = self._get_y(y[0][i], y[1][i]) #get ground truth bbox and class
             a_ic = self._actn_to_bb(b_bb[i], self.anchors) #convert bounding box predictions into plottable format
-            self._torch_gt(ax, ima, a_ic, b_clas[i].max(1)[1], b_clas[i].max(1)[0].sigmoid(), thresh=self.thresh, ignore_bg=ignore_bg)
+            to_keep = self._nms(a_ic, b_clas[i].max(1)[1], b_clas[i].max(1)[0].sigmoid(), thresh=nms_thresh)
+            self._torch_gt(ax, ima, a_ic[to_keep], b_clas[i].max(1)[1][to_keep], b_clas[i].max(1)[0].sigmoid()[to_keep], thresh=prb_thresh, ignore_bg=ignore_bg)
 
         plt.subplots_adjust(wspace=0.15, hspace=0.15)
         
@@ -222,11 +223,10 @@ class SingleShotDetector():
         return lls.cpu() + lcs.cpu() #need to revisit why cpu is necessary
     
     def _show_ground_truth(self, ax, im, bbox: torch.Tensor, clas: Optional[torch.Tensor]=None, 
-                                 prs: Optional[torch.Tensor]=None, thresh: Optional[float]=None, ignore_bg: bool=False):
+                                 prs: Optional[torch.Tensor]=None, thresh: float=.2, ignore_bg: bool=False):
         """Given ax, image, list of bboxes, list of classes, list of probabilities and threshold
            Displays image with ground truth broxes
         """
-        thresh = self.thresh if not thresh else thresh
         bb = [self._bb_hw(o) for o in bbox.reshape(-1,4)]
         if prs is None:  prs  = [None]*len(bb)
         if clas is None: clas = [None]*len(bb)
@@ -242,11 +242,10 @@ class SingleShotDetector():
                 self._draw_text(ax, b[:2], txt, color=self.color_list[i%self.num_color])
 
     def _torch_gt(self, ax, ima, bbox: torch.Tensor, clas: torch.Tensor, 
-                        prs: Optional[torch.Tensor]=None, thresh: Optional[float]=None, 
+                        prs: Optional[torch.Tensor]=None, thresh: float=.2, 
                         ignore_bg: bool=False):
         """Show ground truth given image and torch bbox
         """
-        thresh = self.thresh if not thresh else thresh
         return self._show_ground_truth(ax, ima, to_np((bbox*224).long()),
              to_np(clas), to_np(prs) if prs is not None else None, thresh, ignore_bg=ignore_bg)
     
@@ -257,6 +256,34 @@ class SingleShotDetector():
         actn_centers = ((actn_bbs[:, :2]/2).float() * self.grid_sizes.cuda().float()) + anchors[:,:2].cuda().float() #center relative to anchor box
         actn_hw = ((actn_bbs[:, 2:]/2).float() + 1) * anchors[:,2:].cuda().float() #get height and width relative to anchor box
         return self._hw2corners(actn_centers, actn_hw)
+    
+    def _nms(self, bbox: torch.Tensor, clas:torch.Tensor, clas_prb:torch.Tensor, thresh: float=.4):
+        """Takes bbox, class and class probability vectors, and threshold for IOU
+           Suppresses bboxes overlapping bboxes of the same class with sufficient IOU, keeping higher
+           probability bbox. Returns an index of bboxes to keep
+        """
+        areas = self._box_sz(bbox) #bounding box sizes
+        prb_idx = clas_prb.argsort().tolist() #probability sorted indices (ascending)
+        to_keep = []
+        while len(prb_idx):
+            idx = prb_idx.pop() #get highest probability index
+            to_keep.append(idx)
+            if not len(prb_idx):
+                #we're done
+                break 
+            #calculate IOU between idx box and all others remaining in prb_idx
+            y1 = torch.max(bbox[idx][0], bbox[prb_idx][:, 0]) #get the largest of the bottom ys
+            x1 = torch.max(bbox[idx][1], bbox[prb_idx][:, 1]) #get the largest of the leftmost xs
+            y2 = torch.max(bbox[idx][2], bbox[prb_idx][:, 2]) #get the smallest of the top ys
+            x2 = torch.max(bbox[idx][3], bbox[prb_idx][:, 3]) #get the smallest of the rightmost xs
+            inter = (np.maximum(y2 - y1, 0) * np.maximum(x2 - x1, 0)).cuda() #compute ious
+            union = areas[idx] + areas[prb_idx] - inter
+            ious = inter / union
+            same_class = (clas[idx] == clas[prb_idx]) #flag if same class as idx
+            not_bg = (clas[prb_idx] != 0) #flag if not bg
+            suppress = ((ious > thresh) * same_class * not_bg).tolist() #suppress with iou > thresh, same class as idx and not background
+            prb_idx = [prb_idx[i] for i,v in enumerate(suppress) if v == 0]
+        return to_keep
     
     @staticmethod
     def _show_img(im, figsize=None, ax=None):

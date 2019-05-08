@@ -51,6 +51,7 @@ class SSD_MultiHead(nn.Module):
         self.sconv0 = StdConv(512, 256, stride=1, dropout=dropout).to(device)
         self.sconvs = []
         self.outconvs = []
+        #NOTE this is not exactly generic, requires specific grid sizes, and zooms...TODO
         for i in range(self.grids):
             self.sconvs.append(StdConv(256, 256, dropout=dropout).to(device))
             self.outconvs.append(OutConv(self.k, 256, self.num_classes, bias).to(device))

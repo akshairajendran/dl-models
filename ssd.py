@@ -43,29 +43,29 @@ class OutConv(nn.Module):
         return [flatten_conv(self.oconv1(x), self.k), flatten_conv(self.oconv2(x), self.k)]
 
 class SSD_MultiHead(nn.Module):
-    def __init__(self, k: int, num_classes: int, bias: float, dropout: float=0.1):
+    def __init__(self, k: int, grids: int, num_classes: int, bias: float, dropout: float=0.1, device: str='cuda:0'):
         super().__init__()
-        self.k, self.num_classes = k, num_classes
+        self.k, self.grids, self.num_classes = k, grids, num_classes
         self.drop = nn.Dropout(dropout)
-        self.sconv0 = StdConv(512, 256, stride=1, dropout=dropout)
-        self.sconv1 = StdConv(256, 256, dropout=dropout)
-        self.sconv2 = StdConv(256, 256, dropout=dropout)
-        self.sconv3 = StdConv(256, 256, dropout=dropout)
-        self.out1 = OutConv(self.k, 256, self.num_classes, bias)
-        self.out2 = OutConv(self.k, 256, self.num_classes, bias)
-        self.out3 = OutConv(self.k, 256, self.num_classes, bias)
+        
+        self.sconv0 = StdConv(512, 256, stride=1, dropout=dropout).to(device)
+        self.sconvs = []
+        self.outconvs = []
+        for i in range(self.grids):
+            self.sconvs.append(StdConv(256, 256, dropout=dropout).to(device))
+            self.outconvs.append(OutConv(self.k, 256, self.num_classes, bias).to(device))
         
     def forward(self, x: torch.Tensor):
         x = self.drop(F.relu(x))
         x = self.sconv0(x)
-        x = self.sconv1(x)
-        o1c,o1l = self.out1(x)
-        x = self.sconv2(x)
-        o2c,o2l = self.out2(x)
-        x = self.sconv3(x)
-        o3c,o3l = self.out3(x)
-        return [torch.cat([o1c, o2c, o3c], dim=1),
-                torch.cat([o1l, o2l, o3l], dim=1)]
+        oc, ol = [], []
+        for i in range(self.grids):
+            x = self.sconvs[i](x)
+            oc_i, ol_i = self.outconvs[i](x)
+            oc.append(oc_i)
+            ol.append(ol_i)
+        return [torch.cat(oc, dim=1),
+                torch.cat(ol, dim=1)]
 
 
 # In[21]:
@@ -123,6 +123,9 @@ class SingleShotDetector():
         self.data = data
         self.num_classes = self.data.c
         
+        ###Init Device###
+        self.device = 'cuda:0'
+        
         ###Init Anchors###
         #default settings give a 4x4, 2x2 and 1x1 grid for a total of 16 + 4 + 1 = 21 anchor points
         #3 zooms and 3 ratios for a total of 9 boxes per anchor point
@@ -135,16 +138,17 @@ class SingleShotDetector():
         self.anc_y = np.concatenate([np.tile(np.linspace(ao, 1-ao, ag), ag) for ao,ag in zip(self.anc_offsets, self.anc_grids)])
         self.anc_ctrs = np.repeat(np.stack([self.anc_x, self.anc_y], axis=1), self.k, axis=0)
         self.anc_sizes  =   np.concatenate([np.array([[o/ag,p/ag] for i in range(ag*ag) for o,p in self.anchor_scales]) for ag in self.anc_grids])
-        self.grid_sizes = torch.tensor(np.concatenate([np.array([1/ag for i in range(ag*ag) for o,p in self.anchor_scales])for ag in self.anc_grids])).unsqueeze(1)
-        self.anchors = torch.tensor(np.concatenate([self.anc_ctrs, self.anc_sizes], axis=1))
-        self.anchor_cnr = self._hw2corners(self.anchors[:,:2], self.anchors[:,2:])
+        self.grid_sizes = torch.tensor(np.concatenate([np.array([1/ag for i in range(ag*ag) for o,p in self.anchor_scales])for ag in self.anc_grids])).unsqueeze(1).to(self.device)
+        self.anchors = torch.tensor(np.concatenate([self.anc_ctrs, self.anc_sizes], axis=1)).to(self.device)
+        self.anchor_cnr = self._hw2corners(self.anchors[:,:2], self.anchors[:,2:]).to(self.device)
         
         ###Init Model###
         self.base_arch, self.dropout, self.bias, self.thresh = base_arch, dropout, bias, thresh
         self.loss_func = loss_func(self.num_classes)
-        self.head = SSD_MultiHead(self.k, self.num_classes, self.bias, self.dropout)
+        self.head = SSD_MultiHead(self.k, len(self.anc_grids), self.num_classes, self.bias, self.dropout, device=self.device)
         self.learn = cnn_learner(self.data, self.base_arch, custom_head=self.head)
         self.learn.loss_func = self._ssd_loss
+        self.learn.model.to(self.device)
         
         ###Init Drawing###
         self.num_color = num_color
@@ -192,7 +196,7 @@ class SingleShotDetector():
         bbox, clas = self._get_y(bbox, clas) #reformat gt bbox and gt clas
         if len(bbox) == 0: return 0, 0 #if there's no bbox, we can't use this in our loss
         a_ic = self._actn_to_bb(b_bb, self.anchors) #map activation b_bb to anchor points (defined above)
-        overlaps = self._jaccard(bbox.data, self.anchor_cnr.data.cuda().float()) #get overlaps between gt bbox and anchor boxes
+        overlaps = self._jaccard(bbox.data, self.anchor_cnr.data.float()) #get overlaps between gt bbox and anchor boxes
         gt_overlap, gt_idx = self._map_to_ground_truth(overlaps, verbose)
         gt_clas = clas[gt_idx]
         pos = gt_overlap > thresh
@@ -253,8 +257,8 @@ class SingleShotDetector():
         """Mapping activation to anchor boxes
         """
         actn_bbs = torch.tanh(actn) #map activations to [-1,1]
-        actn_centers = ((actn_bbs[:, :2]/2).float() * self.grid_sizes.cuda().float()) + anchors[:,:2].cuda().float() #center relative to anchor box
-        actn_hw = ((actn_bbs[:, 2:]/2).float() + 1) * anchors[:,2:].cuda().float() #get height and width relative to anchor box
+        actn_centers = ((actn_bbs[:, :2]/2).float() * self.grid_sizes.float()) + anchors[:,:2].float() #center relative to anchor box
+        actn_hw = ((actn_bbs[:, 2:]/2).float() + 1) * anchors[:,2:].float() #get height and width relative to anchor box
         return self._hw2corners(actn_centers, actn_hw)
     
     def _nms(self, bbox: torch.Tensor, clas:torch.Tensor, clas_prb:torch.Tensor, thresh: float=.4):
@@ -276,7 +280,7 @@ class SingleShotDetector():
             x1 = torch.max(bbox[idx][1], bbox[prb_idx][:, 1]) #get the largest of the leftmost xs
             y2 = torch.max(bbox[idx][2], bbox[prb_idx][:, 2]) #get the smallest of the top ys
             x2 = torch.max(bbox[idx][3], bbox[prb_idx][:, 3]) #get the smallest of the rightmost xs
-            inter = (np.maximum(y2 - y1, 0) * np.maximum(x2 - x1, 0)).cuda() #compute ious
+            inter = (np.maximum(y2 - y1, 0) * np.maximum(x2 - x1, 0)).to(self.device) #compute ious
             union = areas[idx] + areas[prb_idx] - inter
             ious = inter / union
             same_class = (clas[idx] == clas[prb_idx]) #flag if same class as idx
@@ -366,8 +370,8 @@ class SingleShotDetector():
     def _jaccard(box_a: torch.Tensor, box_b: torch.Tensor):
         """Computes jaccard distance between two boxes
         """
-        box_a = box_a.cuda().float()
-        box_b = box_b.cuda().float()
+        box_a = box_a.float()
+        box_b = box_b.float()
         inter = SingleShotDetector._intersection(box_a, box_b)
         union = (SingleShotDetector._box_sz(box_a).unsqueeze(1) +                  SingleShotDetector._box_sz(box_b).unsqueeze(0) - inter)
         return inter/union

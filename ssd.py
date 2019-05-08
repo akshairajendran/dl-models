@@ -18,18 +18,32 @@ from typing import List, Union, Tuple, Callable, Optional
 
 
 class StdConv(nn.Module):
-    def __init__(self, nin: int, nout: int, stride: int=2, dropout: float=0.4):
+    def __init__(self, nin: int, nout: int, filter_size: int=3, stride: int=2, padding: int=1, dropout: float=0.1):
         super().__init__()
-        self.conv = nn.Conv2d(nin, nout, 3, stride, padding=1)
+        self.conv = nn.Conv2d(nin, nout, filter_size, stride, padding)
         self.bn = nn.BatchNorm2d(nout)
         self.drop = nn.Dropout(dropout)
-    def forward(self, x: torch.Tensor):
+    def forward(self, x):
         return self.drop(self.bn(F.relu(self.conv(x))))
     
 def flatten_conv(x: torch.Tensor, k: int):
     bs,nf,gx,gy = x.size()
     x = x.permute(0,2,3,1).contiguous()
     return x.view(bs, -1, nf//k)
+
+def conv_params(sz_in: int, sz_out: int):
+    """Solves for filter_size, padding and stride per the following equation,
+       sz_out = (sz_in - filter_size + 2*padding) / stride + 1
+       Attempts to find a solution by iterating over various filter_size, stride and padding
+       in that order. If no solution is found, raises an error
+    """
+    filter_size, stride, padding = [3,2,4,5], [2,1,3], [1,2,3]
+    for f in filter_size:
+        for s in stride:
+            for p in padding:
+                if ((sz_in - f + 2*p) / s + 1) == sz_out:
+                    return (f, s, p)
+    raise Exception("Unable to find valid parameters for {0} to {1} convolution".format(sz_in, sz_out))
 
 class OutConv(nn.Module):
     def __init__(self, k: int, nin: int, nclasses: int, bias: float):
@@ -43,7 +57,7 @@ class OutConv(nn.Module):
         return [flatten_conv(self.oconv1(x), self.k), flatten_conv(self.oconv2(x), self.k)]
 
 class SSD_MultiHead(nn.Module):
-    def __init__(self, k: int, grids: int, num_classes: int, bias: float, dropout: float=0.1, device: str='cuda:0'):
+    def __init__(self, k: int, grids: List[int], num_classes: int, bias: float, dropout: float=0.1, device: str='cuda:0'):
         super().__init__()
         self.k, self.grids, self.num_classes = k, grids, num_classes
         self.drop = nn.Dropout(dropout)
@@ -51,16 +65,20 @@ class SSD_MultiHead(nn.Module):
         self.sconv0 = StdConv(512, 256, stride=1, dropout=dropout).to(device)
         self.sconvs = []
         self.outconvs = []
-        #NOTE this is not exactly generic, requires specific grid sizes, and zooms...TODO
-        for i in range(self.grids):
-            self.sconvs.append(StdConv(256, 256, dropout=dropout).to(device))
+        
+        for i in range(len(self.grids)):
+            sz_in = 7 if i == 0 else self.grids[i-1] #the 0th conv is taking a 7x7 grid from resnet34 output
+            sz_out = self.grids[i]
+            filter_size, stride, padding = conv_params(sz_in, sz_out)
+            
+            self.sconvs.append(StdConv(256, 256, filter_size=filter_size, stride=stride, padding=padding, dropout=dropout).to(device))
             self.outconvs.append(OutConv(self.k, 256, self.num_classes, bias).to(device))
         
     def forward(self, x: torch.Tensor):
         x = self.drop(F.relu(x))
         x = self.sconv0(x)
         oc, ol = [], []
-        for i in range(self.grids):
+        for i in range(len(self.grids)):
             x = self.sconvs[i](x)
             oc_i, ol_i = self.outconvs[i](x)
             oc.append(oc_i)
@@ -146,7 +164,7 @@ class SingleShotDetector():
         ###Init Model###
         self.base_arch, self.dropout, self.bias, self.thresh = base_arch, dropout, bias, thresh
         self.loss_func = loss_func(self.num_classes)
-        self.head = SSD_MultiHead(self.k, len(self.anc_grids), self.num_classes, self.bias, self.dropout, device=self.device)
+        self.head = SSD_MultiHead(self.k, self.anc_grids, self.num_classes, self.bias, self.dropout, device=self.device)
         self.learn = cnn_learner(self.data, self.base_arch, custom_head=self.head)
         self.learn.loss_func = self._ssd_loss
         self.learn.model.to(self.device)

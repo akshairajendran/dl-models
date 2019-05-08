@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[23]:
-
-
 from path import Path
 from fastai.vision import *
 import numpy as np
@@ -12,10 +6,6 @@ import matplotlib.cm as cmx
 import matplotlib.colors as mcolors
 from cycler import cycler
 from typing import List, Union, Tuple, Callable, Optional
-
-
-# In[20]:
-
 
 class StdConv(nn.Module):
     def __init__(self, nin: int, nout: int, filter_size: int=3, stride: int=2, padding: int=1, dropout: float=0.1):
@@ -87,9 +77,6 @@ class SSD_MultiHead(nn.Module):
                 torch.cat(ol, dim=1)]
 
 
-# In[21]:
-
-
 def one_hot_embedding(labels: torch.Tensor, num_classes: int):
     """Returns a one hot embedded matrix
     """
@@ -123,9 +110,6 @@ class FocalLoss(BCE_Loss):
         w = alpha*t + (1-alpha)*(1-t)
         w = w * (1-pt).pow(gamma)
         return w.detach()
-
-
-# In[27]:
 
 
 class SingleShotDetector():
@@ -392,7 +376,8 @@ class SingleShotDetector():
         box_a = box_a.float()
         box_b = box_b.float()
         inter = SingleShotDetector._intersection(box_a, box_b)
-        union = (SingleShotDetector._box_sz(box_a).unsqueeze(1) +                  SingleShotDetector._box_sz(box_b).unsqueeze(0) - inter)
+        union = (SingleShotDetector._box_sz(box_a).unsqueeze(1) + \
+                 SingleShotDetector._box_sz(box_b).unsqueeze(0) - inter)
         return inter/union
 
     @staticmethod
@@ -406,10 +391,6 @@ class SingleShotDetector():
         gt_overlap[prior_idx] = 1.99
         for i,o in enumerate(prior_idx): gt_idx[o] = i
         return gt_overlap, gt_idx
-
-
-# In[ ]:
-
 
 
 

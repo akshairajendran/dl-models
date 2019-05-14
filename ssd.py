@@ -1,3 +1,9 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[23]:
+
+
 from path import Path
 from fastai.vision import *
 import numpy as np
@@ -6,6 +12,10 @@ import matplotlib.cm as cmx
 import matplotlib.colors as mcolors
 from cycler import cycler
 from typing import List, Union, Tuple, Callable, Optional
+
+
+# In[20]:
+
 
 class StdConv(nn.Module):
     def __init__(self, nin: int, nout: int, filter_size: int=3, stride: int=2, padding: int=1, dropout: float=0.1):
@@ -77,6 +87,9 @@ class SSD_MultiHead(nn.Module):
                 torch.cat(ol, dim=1)]
 
 
+# In[21]:
+
+
 def one_hot_embedding(labels: torch.Tensor, num_classes: int):
     """Returns a one hot embedded matrix
     """
@@ -112,6 +125,9 @@ class FocalLoss(BCE_Loss):
         return w.detach()
 
 
+# In[27]:
+
+
 class SingleShotDetector():
     """Single shot detector model for multiple object detection
        Takes databunch object and creates learner for training and inference
@@ -119,7 +135,7 @@ class SingleShotDetector():
     def __init__(self, data: ObjectItemList, anc_grids: List[int]=[4, 2, 1], anc_zooms: List[float]=[.7, 1., 1.3],
                        anc_ratios: List[Tuple[float, float]]=[(1., 1.), (1., 0.5), (0.5, 1.)],
                        base_arch: Callable=models.resnet34, dropout: float=0.1, bias: float=-4.,
-                       loss_func: nn.Module=FocalLoss, thresh: float=.4,
+                       loss_func: nn.Module=FocalLoss, thresh: float=.4, metrics: List[Callable]=[],
                        num_color: int=12, verbose: bool=False):
         
         ###Init Data###
@@ -149,7 +165,7 @@ class SingleShotDetector():
         self.base_arch, self.dropout, self.bias, self.thresh = base_arch, dropout, bias, thresh
         self.loss_func = loss_func(self.num_classes)
         self.head = SSD_MultiHead(self.k, self.anc_grids, self.num_classes, self.bias, self.dropout, device=self.device)
-        self.learn = cnn_learner(self.data, self.base_arch, custom_head=self.head)
+        self.learn = cnn_learner(self.data, self.base_arch, custom_head=self.head, metrics=metrics)
         self.learn.loss_func = self._ssd_loss
         self.learn.model.to(self.device)
         
@@ -228,6 +244,43 @@ class SingleShotDetector():
         if verbose:
             print("loc: {0}, clas: {1}".format(lls.data[0], lcs.data[0]))
         return lls.cpu() + lcs.cpu() #need to revisit why cpu is necessary
+    
+    def kaggle_1_loss(self, pred_bbox: torch.Tensor, pred_clas: torch.Tensor, 
+                            gt_bbox: torch.Tensor, gt_clas: torch.Tensor):
+        """Custom kaggle error metric, checks if any predicted bboxes
+           match the class of any ground truth bboxes AND if those bboxes
+           have an overlap >= 50%, if so returns 0 else 1. This acts on 
+           one image. Note that this selects the top 5 highest confidence bboxes 
+           that are not background for comparison
+        """
+        gt_bbox, gt_clas = self._get_y(gt_bbox, gt_clas) #reformat gt bbox and gt clas
+        pred_bbox = self._actn_to_bb(pred_bbox, self.anchors) #map pred_bbox to anchor points
+        pred_clas_maxprb, pred_clas_maxidx = pred_clas[:, 1:].max(dim=1) #get the highest probability and class for each bbox
+        pred_clas_maxprb = torch.exp(pred_clas_maxprb) * (pred_clas_maxidx != 0).float() #if background is most likely class, ignore
+        pred_top = np.argsort(pred_clas_maxprb)[:5] #get the 5 bboxes with highest probability
+        clas_top = pred_clas_maxidx[pred_top] #top 5 classes
+        bbox_top = pred_bbox[pred_top] #top 5 bboxes
+        for i_pred,clas_pred in enumerate(clas_top):
+            for i_gt,clas_gt in enumerate(gt_clas):
+                if clas_pred !=  clas_gt:
+                    continue
+                overlap = self._jaccard(bbox_top[i_pred].unsqueeze(0), gt_bbox[i_gt].unsqueeze(0)).item()
+                if overlap >= .5:
+                    return 0
+        return 1
+
+    def kaggle_loss(self, preds: List[torch.Tensor], targ_bbox: torch.Tensor, targ_clas: torch.Tensor):
+        """Custom kaggle error metric, checks if any predicted bboxes
+           match the class of any ground truth bboxes AND if those bboxes
+           have an overlap >= 50%, if so returns 0 else 1. This acts on a batch of images.
+        """
+        loss = 0
+        for pred_clas,pred_bbox,gt_bbox,gt_clas in zip(*preds, targ_bbox, targ_clas):
+            if len(gt_bbox) == 0:
+                continue
+            loss += self.kaggle_1_loss(pred_bbox, pred_clas, gt_bbox, gt_clas)
+        return torch.Tensor([loss / targ_clas.shape[0]]).to(self.device)
+        
     
     def _show_ground_truth(self, ax, im, bbox: torch.Tensor, clas: Optional[torch.Tensor]=None, 
                                  prs: Optional[torch.Tensor]=None, thresh: float=.2, ignore_bg: bool=False):
@@ -376,8 +429,7 @@ class SingleShotDetector():
         box_a = box_a.float()
         box_b = box_b.float()
         inter = SingleShotDetector._intersection(box_a, box_b)
-        union = (SingleShotDetector._box_sz(box_a).unsqueeze(1) + \
-                 SingleShotDetector._box_sz(box_b).unsqueeze(0) - inter)
+        union = (SingleShotDetector._box_sz(box_a).unsqueeze(1) +                  SingleShotDetector._box_sz(box_b).unsqueeze(0) - inter)
         return inter/union
 
     @staticmethod
@@ -391,6 +443,10 @@ class SingleShotDetector():
         gt_overlap[prior_idx] = 1.99
         for i,o in enumerate(prior_idx): gt_idx[o] = i
         return gt_overlap, gt_idx
+
+
+# In[ ]:
+
 
 
 
